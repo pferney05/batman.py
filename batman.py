@@ -3,6 +3,7 @@
 import lxml.etree
 import numpy as np
 import numpy.linalg
+import scipy
 import scipy.linalg
 import pandas as pd
 import warnings
@@ -372,6 +373,12 @@ class Step:
         PeDiPX0 = np.matmul(self.P,eDiPX0)
         return np.abs(PeDiPX0)
 
+    def solve_step(self, tpoints, method = 'RK45', atol = 1.e-3, rtol=1.e-6):
+        def func(t, X):
+            return np.matmul(self.A, X)
+        sol =  scipy.integrate.solve_ivp(func, [self.t0 , self.tEnd], self.X0, method=method, t_eval = tpoints, atol=atol, rtol=rtol)
+        return sol.y
+
     @classmethod
     def initial(cls, iniQty: dict, flux: Flux, chain: Chain, t0: float = 0., endTime: float =+np.inf, fissionProducts: bool = True):
         thisStep = cls(chain, t0, endTime, fissionProducts)
@@ -461,6 +468,7 @@ class Sequence(list):
         nDot = len(tpoints)
         output = np.zeros((nNuc, nDot))
         for i, t in enumerate(tpoints):
+            print(i)
             step = self.get_step(t)
             output[:,i] = step.solve(t)
         return output
@@ -569,3 +577,146 @@ class Sequence(list):
     @staticmethod
     def show():
         plt.show()
+
+class Continuous:
+
+    def __init__(self, chain, time, flux, iniQty, fission = True):
+        self.chain = chain
+        self.time = time 
+        self.flux = flux
+        step0= Step(chain,time[0],time[-1], fissionProducts=fission)
+        step1 = Step(chain,time[0],time[-1], fissionProducts=fission)
+        step0.nuclideIndex = step0.init_index(iniQty.keys(), chain)
+        self.nuclideIndex = step0.nuclideIndex
+        step0.X0=step0.init_quantity(iniQty)
+        self.X0 = step0.X0
+        step1.init_matrix(1.)
+        mat0 = step0.init_matrix(Flux(0.))
+        mat1 = step0.init_matrix(Flux(1.))
+        self.A = mat1 - mat0
+        self.B = mat0
+        
+
+    def get_power(self, t):
+        return np.interp(t, self.time, self.flux)
+    
+    def solve(self, tpoints, method = 'Radau', atol = 1.e-3, rtol = 1.e-6):
+        def _func(t, X):
+            f = self.get_power(t)
+            M = self.B + f * self.A
+            return np.matmul(M, X)
+        def _jac(t, X):
+            f = self.get_power(t)
+            M = self.B + f * self.A
+            return M
+
+        tmin = self.time[0]
+        tmax = self.time[-1]
+
+        if method in ['RK45','RK23','DOP853']:
+            sol = scipy.integrate.solve_ivp(_func, [tmin, tmax], self.X0, method=method, t_eval=tpoints, atol = atol, rtol = rtol)
+        else:
+            sol = scipy.integrate.solve_ivp(_func, [tmin, tmax], self.X0, method=method, t_eval=tpoints, atol = atol, rtol = rtol, jac = _jac)
+
+        return sol.y
+    
+    def solve_activity(self, tpoints, method = 'Radau', atol = 1.e-3, rtol = 1.e-6):
+        quantities = self.solve(tpoints, method, atol, rtol)
+        totalActivity = np.zeros(np.shape(quantities)[1])
+        activity = np.zeros_like(quantities)
+        for nuc in self.nuclideIndex.keys():
+            index = self.nuclideIndex[nuc]
+            activity[index,:] = self.chain[nuc].l * quantities[index,:]
+            totalActivity += activity[index,:]
+        return activity, totalActivity
+
+    def _plot(self, title='', xLabel='', yLabel='', xmin = None, xmax=None, ymin = None, ymax=None, ppp=150, xlogScale = False, ylogScale = True):
+        num = len(plt.get_fignums())
+        fig=plt.figure(num=num, figsize=[6.4,4.8],dpi=ppp, frameon=True)
+        ax=fig.add_axes([0.12,0.12,0.75,0.75])
+        ax.set_title(title, fontsize=20)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        if xlogScale:
+            ax.set_xscale('log')
+        if ylogScale:
+            ax.set_yscale('log')
+        ax.set_xlim(xmin,xmax)
+        ax.set_ylim(ymin,ymax)
+        ax.set_xlabel(xLabel)
+        ax.set_ylabel(yLabel)
+        ax.tick_params(which='major',direction='out', length=8, width=1)
+        ax.tick_params(which='minor',direction='out', length=4, width=0.8)
+        ax.minorticks_on()
+        ax.grid(which="major",zorder=0,color='#C0C0C0')
+        ax.grid(which="minor",zorder=-1,color='#E0E0E0')
+        return fig, ax
+
+    def plot_quantity(self, tpoints: list, nuclideList: list = 'all', title='', xLabel='', yLabel='', xmin = None, xmax=None, ymin = None, ymax=None, ls='-', marker='', lw = 0.75, cmap='viridis', ppp=150, xlogScale = False, ylogScale = True, xscale=1.):
+        nuclideIndex = self.nuclideIndex
+        output = self.solve(tpoints)
+        if nuclideList=='all':
+            nuclideList=list(nuclideIndex.keys())
+        iList = []
+        for nuc in nuclideList:
+            iList.append(nuclideIndex[nuc])
+        if xmin is None:
+            xmin = np.min(tpoints)/xscale
+            if xmin == 0. and xlogScale:
+                xmin=1./xscale
+        if xmax is None:
+            xmax = np.max(tpoints)/xscale
+        if ymin is None:
+            if ylogScale:
+                ymin = 1.
+            else:
+                ymin=0.
+        if ymax is None:
+            ymax = np.max(output[iList,:])
+        fig, ax = self._plot(title, xLabel, yLabel, float(xmin), float(xmax), float(ymin), float(ymax), ppp, xlogScale, ylogScale)
+        colormap = plt.get_cmap(cmap)
+        colors = colormap(np.linspace(0,1,len(nuclideList)))
+        for i, nuc in enumerate(nuclideList):
+            col = colors[i]
+            index = nuclideIndex[nuc]
+            yVector = output[index,:]
+            line,=ax.plot(tpoints/xscale,yVector,ls=ls,linewidth=lw,marker=marker,markersize=4,zorder=3,color=col)
+            line.set_label(nuc)
+        ax.legend()
+        return fig, ax
+    
+    def plot_activity(self, tpoints: list, nuclideList: list = 'all', title='', xLabel='', yLabel='', xmin = None, xmax=None, ymin = None, ymax=None, ls='-', marker='', lw = 0.75, cmap='viridis', ppp=150, xlogScale = False, ylogScale = True, xscale=1.):
+        nuclideIndex = self.nuclideIndex
+        activity, totalActivity = self.solve_activity(tpoints)
+        if nuclideList=='all':
+            nuclideList=list(nuclideIndex.keys())
+        iList = []
+        for nuc in nuclideList:
+            iList.append(nuclideIndex[nuc])
+        if xmin is None:
+            xmin = np.min(tpoints)/xscale
+            if xmin == 0. and xlogScale:
+                xmin=1./xscale
+        if xmax is None:
+            xmax = np.max(tpoints)/xscale
+        if ymin is None:
+            if ylogScale:
+                ymin = 1.
+            else:
+                ymin=0.
+        if ymax is None:
+            ymax = np.max(totalActivity[iList,:])
+        fig, ax = self._plot(title, xLabel, yLabel, float(xmin), float(xmax), float(ymin), float(ymax), ppp, xlogScale, ylogScale)
+        colormap = plt.get_cmap(cmap)
+        colors = colormap(np.linspace(0,1,len(nuclideList)))
+        activity, totalActivity = self.solve_activity(tpoints)
+        line,=ax.plot(tpoints/xscale,totalActivity,ls=ls,linewidth=2*lw,marker=marker,markersize=4,zorder=3,color='#000000')
+        line.set_label('total')
+        for i, nuc in enumerate(nuclideList):
+            col = colors[i]
+            index = nuclideIndex[nuc]
+            yVector = activity[index,:]
+            line,=ax.plot(tpoints/xscale,yVector,ls=ls,linewidth=lw,marker=marker,markersize=4,zorder=3,color=col)
+            line.set_label(nuc)
+        ax.legend()
+        return fig, ax
