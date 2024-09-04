@@ -15,19 +15,18 @@ flux = batman.Flux(fluxes=7.e11)
 chain = batman.Chain()
 chain.load_cross_sections('Xsection.csv')
 
-seq = batman.Sequence(chain,False)
-seq.set_init_quantity(startingQuantity)
-seq.add_initial(0.,7200.,flux)
-seq.add_after_last()
-seq.check_steps()
+time = np.array([0.,7200,7200.1,86400.])
+power = np.array([7.e11,10.e11,0.,0.])
+prob = batman.Continuous(chain, time, power, startingQuantity, fission=False)
 
 tpoints = np.linspace(0.,86400.,num=240)
+
 nuclideList = ['Fe54','Fe55','Fe56','Fe57','Fe58','Fe59','Co59']
 
-activity, totalActivity = seq.solve_activity(tpoints)
+activity, totalActivity = prob.solve_activity(tpoints)
 print("%.0f sec: %.0f Bq"%(tpoints[-1],totalActivity[-1]))
 
-seq.plot_quantity(tpoints,nuclideList,ymax=10**24,xlogScale=False,cmap='jet')
-seq.plot_activity(tpoints,nuclideList,ymax=10**9,xlogScale=False,cmap='jet')
+prob.plot_quantity(tpoints,nuclideList,ymax=10**24,xlogScale=False,cmap='jet')
+prob.plot_activity(tpoints,nuclideList,ymax=10**9,xlogScale=False,cmap='jet')
 
 batman.Sequence.show()
